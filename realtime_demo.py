@@ -1,6 +1,9 @@
 """
-- Real-time eye-tracking/mouse mode + puzzle mode with heatmaps
-- With calibration
+Real-time demo — eye-tracking/mouse mode + puzzle mode with prediction heatmaps.
+
+Pipeline: webcam → pupil detection (MediaPipe / CNN / HoughCircles)
+→ calibration → gaze position → square fixations → Transformer
+→ probability heatmap of the next move's destination square.
 """
 
 import pygame
@@ -16,38 +19,30 @@ from transformer_model import build_transformer, causal_mask, SOS_IDX, PAD_IDX
 from transformer_dataset import encode_sequence, idx_to_square, SEQ_LEN
 from utils import screen_to_square
 from model import GazeCNN
+import ui_theme as ui
 
 # Layout
-BOARD_OFFSET = 40
-BOARD_SIZE   = 560
-SQUARE_SIZE  = BOARD_SIZE // 8
+MARGIN      = 24
+BOARD_X     = MARGIN
+BOARD_Y     = ui.HEADER_H + 20
+BOARD_SIZE  = 560
+SQUARE_SIZE = BOARD_SIZE // 8
 
+PANEL_X     = BOARD_X + BOARD_SIZE + 24
+CAM_CARD_W  = 234
+CAM_W       = 210            # displayed video width
+CAM_VID_H   = 158            # displayed video height (4:3)
+CAM_CARD_H  = 224
+GAP         = 12
+INFO_X      = PANEL_X + CAM_CARD_W + GAP
+INFO_W      = 210
+PANEL_W     = CAM_CARD_W + GAP + INFO_W
 
-# Dimensions
-PANEL_X   = BOARD_OFFSET + BOARD_SIZE + 20
-CAM_W     = 210   
-CAM_H     = 180    
+CHART_Y     = BOARD_Y + CAM_CARD_H + GAP
+CHART_H     = BOARD_SIZE - CAM_CARD_H - GAP
 
-GAP       = 10     
-INFO_W    = 210   
-TOP_H     = CAM_H  
-
-PANEL_W   = CAM_W + GAP + INFO_W          
-LBL_H     = 18    
-BAR_Y     = BOARD_OFFSET + TOP_H + LBL_H + 8  
-BAR_H     = BOARD_SIZE - (BAR_Y - BOARD_OFFSET) - 4
-
-WINDOW_W  = BOARD_OFFSET + BOARD_SIZE + 20 + PANEL_W + 20
-WINDOW_H  = BOARD_OFFSET + BOARD_SIZE + BOARD_OFFSET
-
-# Y coordinates
-CAM_Y     = BOARD_OFFSET                  
-INFO_Y    = BOARD_OFFSET                 
-CAM_LBL_Y = BOARD_OFFSET + TOP_H + 2     
-BAR_LBL_Y = CAM_LBL_Y + LBL_H + 2      
-INFO_X    = PANEL_X + CAM_W + GAP        
-
-CAM_H_DISPLAY = CAM_H
+WINDOW_W    = INFO_X + INFO_W + MARGIN
+WINDOW_H    = BOARD_Y + BOARD_SIZE + 44
 
 TRANSFORMER_PATH = 'checkpoints/best_transformer.pth'
 CNN_PATH         = 'checkpoints/best_model.pth'
@@ -55,15 +50,9 @@ CALIB_FILE       = 'checkpoints/calibration.npy'
 
 GAZE_WINDOW  = 20
 TRIM         = 3
-MIN_DWELL    = 8      # frames including the same filed - fixation
+MIN_DWELL    = 8      # frames on the same square = fixation
 UPDATE_EVERY = 10     # frames between predictions (faster update)
 SMOOTH_N     = 25     # moving average pupil coords (more -> more stable)
-
-C_LIGHT=(240,217,181); C_DARK=(181,136,99)
-C_BG=(30,30,30);       C_PANEL=(45,45,45)
-C_TEXT=(220,220,220);  C_DIM=(140,140,140)
-C_GREEN=(50,210,50);   C_RED=(220,60,60)
-C_ORANGE=(255,140,40); C_YELLOW=(240,200,0)
 
 PIECES = {
     chess.PAWN:   {chess.WHITE:'♙',chess.BLACK:'♟'},
@@ -76,12 +65,12 @@ PIECES = {
 
 # Puzzles if there is no csv with lichess puzzles
 FALLBACK_PUZZLES = [
-    {'fen':'4k3/8/4K3/4R3/8/8/8/8 w - - 0 1','solution':'e5e8','desc':'Mat u 1 — top na e8'},
-    {'fen':'6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1','solution':'e1e8','desc':'Top na 8. redu'},
-    {'fen':'r3k2r/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R4RK1 w kq - 0 1','solution':'f1f8','desc':'Napad topom'},
-    {'fen':'8/8/8/3k4/8/3K4/8/4R3 w - - 0 1','solution':'e1e5','desc':'Top na 5. redu'},
+    {'fen':'4k3/8/4K3/4R3/8/8/8/8 w - - 0 1','solution':'e5e8','desc':'Mate in 1 — rook to e8'},
+    {'fen':'6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1','solution':'e1e8','desc':'Rook to the 8th rank'},
+    {'fen':'r3k2r/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R4RK1 w kq - 0 1','solution':'f1f8','desc':'Rook attack'},
+    {'fen':'8/8/8/3k4/8/3K4/8/4R3 w - - 0 1','solution':'e1e5','desc':'Rook to the 5th rank'},
     {'fen':'r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4',
-     'solution':'f3g5','desc':'Napad na f7'},
+     'solution':'f3g5','desc':'Attack on f7'},
 ]
 
 # Moving average filter for coordinate stabilization
@@ -151,14 +140,14 @@ def get_mediapipe():
             print("MediaPipe Face Mesh loaded.")
         except ImportError:
             print("MediaPipe not installed — using HoughCircles.")
-            _mp_face_mesh = False 
+            _mp_face_mesh = False
     return _mp_face_mesh if _mp_face_mesh else None
 
 
 def detect_pupil_tracking(frame_bgr):
     """
     Pupil detection for calibration and training
-    
+
       1. MediaPipe Face Mesh — iris landmarks
       2. HoughCircles fallback
 
@@ -225,12 +214,12 @@ def detect_pupil_tracking(frame_bgr):
 
 # Trained CNN from Kaggle dataset
 def load_cnn(path, device):
-   
+
     model = GazeCNN(img_size=128, dropout=0.5).to(device)
     if os.path.exists(path):
         ckpt = torch.load(path, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
-        print(f"CNN ucitan: {path}")
+        print(f"CNN loaded: {path}")
         model.eval()
         return model
     print(f"CNN not found ({path}) — using HoughCircles fallback")
@@ -239,7 +228,7 @@ def load_cnn(path, device):
 def detect_pupil(frame_bgr, cnn_model=None, device='cpu'):
     """
       1. Haar cascade - ROI = eye
-      2. GazeCNN -> pupil (x,y,r) 
+      2. GazeCNN -> pupil (x,y,r)
       3. convert to camera pixels
 """
     if frame_bgr is None:
@@ -271,7 +260,7 @@ def detect_pupil(frame_bgr, cnn_model=None, device='cpu'):
             pil = PILImage.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
             t   = _CNN_TRANSFORM(pil).unsqueeze(0).to(device)
             with torch.no_grad():
-                out = cnn_model(t)[0]   # [x_norm, y_norm, r_norm] u [0,1]
+                out = cnn_model(t)[0]   # [x_norm, y_norm, r_norm] in [0,1]
             cx_cam = int(x1 + out[0].item() * cw)
             cy_cam = int(y1 + out[1].item() * ch)
             r_cam  = max(int(out[2].item() * min(cw,ch)), 5)
@@ -296,8 +285,8 @@ def detect_pupil(frame_bgr, cnn_model=None, device='cpu'):
 
 
 # Calibration - on board - 4 corners + 4 x edge middle + center
-_BX = BOARD_OFFSET          # left side of the board
-_BY = BOARD_OFFSET          # top side of the board
+_BX = BOARD_X               # left side of the board
+_BY = BOARD_Y               # top side of the board
 _BW = BOARD_SIZE            # board width
 _BH = BOARD_SIZE            # board height
 
@@ -313,26 +302,27 @@ CALIB_PTS = [
     (_BX + _BW - 40,    _BY + _BH - 40),      # bottom right
 ]
 
-def run_calibration(screen, cap, fb, fu, cnn_model=None, device='cpu'):
+def run_calibration(screen, cap, cnn_model=None, device='cpu'):
     screen_pts=[]; pupil_pts=[]; clock=pygame.time.Clock()
 
     for i,(sx,sy) in enumerate(CALIB_PTS):
-        # space for calibrate
+        # wait for SPACE on each point
         while True:
-            screen.fill((20,20,20))
+            screen.fill(ui.BG)
             for j,(px,py) in enumerate(CALIB_PTS):
-                if j<i:    pygame.draw.circle(screen,(0,120,0),(px,py),8)
+                if j<i:
+                    pygame.draw.circle(screen,ui.GREEN_DARK,(px,py),8)
+                    pygame.draw.circle(screen,ui.GREEN,(px,py),8,1)
                 elif j==i:
                     r=14+int(4*np.sin(time.time()*4))
-                    pygame.draw.circle(screen,C_GREEN,(px,py),r)
-                    pygame.draw.circle(screen,C_YELLOW,(px,py),5)
-                else:      pygame.draw.circle(screen,C_DIM,(px,py),8)
-            screen.blit(fb.render(f"Kalibracija  {i+1}/{len(CALIB_PTS)}",True,C_TEXT),
-                        fb.render(f"Kalibracija  {i+1}/{len(CALIB_PTS)}",True,C_TEXT
-                                  ).get_rect(center=(WINDOW_W//2,WINDOW_H-70)))
-            screen.blit(fu.render("Gledaj tačku → SPACE   |   ESC=preskoci",True,C_DIM),
-                        fu.render("Gledaj tačku → SPACE   |   ESC=preskoci",True,C_DIM
-                                  ).get_rect(center=(WINDOW_W//2,WINDOW_H-40)))
+                    ui.glow_circle(screen,(px,py),r,ui.GREEN,3)
+                    pygame.draw.circle(screen,ui.AMBER,(px,py),5)
+                else:
+                    pygame.draw.circle(screen,(60,66,80),(px,py),8,2)
+            ui.text(screen,f"Calibration  {i+1}/{len(CALIB_PTS)}",
+                    (WINDOW_W//2,WINDOW_H-76),18,ui.TEXT,bold=True,anchor='center')
+            ui.text(screen,"Look at the dot, then press SPACE   ·   ESC to skip",
+                    (WINDOW_W//2,WINDOW_H-46),13,ui.DIM,anchor='center')
             pygame.display.flip(); clock.tick(30)
             done=False
             for ev in pygame.event.get():
@@ -344,7 +334,7 @@ def run_calibration(screen, cap, fb, fu, cnn_model=None, device='cpu'):
         # record
         samples=[]; collected=0
         while collected < 20:
-            screen.fill((20,20,20))
+            screen.fill(ui.BG)
             if cap:
                 ret,frame=cap.read()
                 if ret:
@@ -356,17 +346,14 @@ def run_calibration(screen, cap, fb, fu, cnn_model=None, device='cpu'):
                         cx,cy,r=detect_pupil(frame,cnn_model,device)
                         if cx is None: continue
                     if cx is not None: samples.append((cx,cy)); collected+=1
-                    rgb=cv2.cvtColor(cv2.resize(frame,(CAM_W,CAM_H)),cv2.COLOR_BGR2RGB)
+                    rgb=cv2.cvtColor(cv2.resize(frame,(CAM_W,CAM_VID_H)),cv2.COLOR_BGR2RGB)
                     screen.blit(pygame.surfarray.make_surface(
-                        np.transpose(rgb,(1,0,2))),(PANEL_X,BOARD_OFFSET))
-            pygame.draw.circle(screen,C_GREEN,(sx,sy),14)
-            pygame.draw.circle(screen,C_YELLOW,(sx,sy),5)
-            bw=int(300*collected/20)
-            pygame.draw.rect(screen,(60,60,60),(WINDOW_W//2-150,WINDOW_H-50,300,16))
-            pygame.draw.rect(screen,C_GREEN,(WINDOW_W//2-150,WINDOW_H-50,bw,16))
-            screen.blit(fu.render(f"Snimam... {collected}/20",True,C_TEXT),
-                        fu.render(f"Snimam... {collected}/20",True,C_TEXT
-                                  ).get_rect(center=(WINDOW_W//2,WINDOW_H-70)))
+                        np.transpose(rgb,(1,0,2))),(PANEL_X,BOARD_Y))
+            ui.glow_circle(screen,(sx,sy),14,ui.GREEN,3)
+            pygame.draw.circle(screen,ui.AMBER,(sx,sy),5)
+            ui.text(screen,f"Recording...  {collected}/20",
+                    (WINDOW_W//2,WINDOW_H-76),14,ui.TEXT,bold=True,anchor='center')
+            ui.progress(screen,(WINDOW_W//2-150,WINDOW_H-52,300,12),collected/20)
             pygame.display.flip(); clock.tick(30)
             for ev in pygame.event.get():
                 if ev.type==pygame.QUIT: return None
@@ -401,7 +388,7 @@ def run_calibration(screen, cap, fb, fu, cnn_model=None, device='cpu'):
     pred_y = F @ coef_y
     err_x = np.mean(np.abs(pred_x - dst[:,0]))
     err_y = np.mean(np.abs(pred_y - dst[:,1]))
-    print(f"Kalibracija greska: x={err_x:.1f}px  y={err_y:.1f}px")
+    print(f"Calibration error: x={err_x:.1f}px  y={err_y:.1f}px")
 
     H = {'type': 'poly', 'coef_x': coef_x, 'coef_y': coef_y}
     np.save(CALIB_FILE, H, allow_pickle=True)
@@ -454,7 +441,7 @@ def load_transformer(path,device):
                         feed_forward_dimension=c.get('feed_forward_dimension',256)
                         ).to(device)
     m.load_state_dict(ckpt['model_state_dict']); m.eval()
-    print("Transformer učitan."); return m
+    print("Transformer loaded."); return m
 
 
 def predict_probs(transformer,gaze_seq,device):
@@ -510,81 +497,93 @@ def sq_cr(sq, flipped=False):
     f = chess.square_file(sq)
     r = chess.square_rank(sq)
     if flipped:
-        return 7-f, r      
-    return f, 7-r          
+        return 7-f, r
+    return f, 7-r
 
-def draw_board(screen,board,fp,fl,probs,trail,gaze_sq,sel_sq=None,legal_sqs=None,flipped=False):
+
+def draw_piece(screen, fnt, sym, center, is_white):
+    sh = fnt.render(sym, True, (20, 18, 16))
+    screen.blit(sh, sh.get_rect(center=(center[0]+2, center[1]+2)))
+    clr = (250, 250, 250) if is_white else (28, 28, 30)
+    t = fnt.render(sym, True, clr)
+    screen.blit(t, t.get_rect(center=center))
+
+
+def draw_board_coords(screen, bx, by, sq_s, flipped):
+    """Coordinates rendered inside the edge squares (lichess style)."""
+    for i in range(8):
+        fn = chess.FILE_NAMES[7-i] if flipped else chess.FILE_NAMES[i]
+        clr = ui.BOARD_DARK if (i+7) % 2 == 0 else ui.BOARD_LIGHT
+        ui.text(screen, fn, (bx+i*sq_s+sq_s-4, by+8*sq_s-2), 11, clr,
+                bold=True, anchor='bottomright')
+        rn = str(i+1) if flipped else str(8-i)
+        clr = ui.BOARD_DARK if i % 2 == 0 else ui.BOARD_LIGHT
+        ui.text(screen, rn, (bx+3, by+i*sq_s+1), 11, clr, bold=True)
+
+
+def draw_board(screen,board,fp,probs,trail,gaze_sq,sel_sq=None,legal_sqs=None,flipped=False):
+    # frame behind the board
+    pygame.draw.rect(screen, ui.BOARD_FRAME,
+                     (BOARD_X-6, BOARD_Y-6, BOARD_SIZE+12, BOARD_SIZE+12),
+                     border_radius=8)
     top1=int(np.argmax(probs)) if probs is not None else None
     for sq in chess.SQUARES:
         col,row=sq_cr(sq,flipped)
-        rect=pygame.Rect(BOARD_OFFSET+col*SQUARE_SIZE,
-                         BOARD_OFFSET+row*SQUARE_SIZE,SQUARE_SIZE,SQUARE_SIZE)
-        pygame.draw.rect(screen,C_LIGHT if (col+row)%2==0 else C_DARK,rect)
+        rect=pygame.Rect(BOARD_X+col*SQUARE_SIZE,
+                         BOARD_Y+row*SQUARE_SIZE,SQUARE_SIZE,SQUARE_SIZE)
+        pygame.draw.rect(screen,ui.BOARD_LIGHT if (col+row)%2==0 else ui.BOARD_DARK,rect)
 
         if probs is not None:
             p=probs[sq]
             if p>0.01:
                 a=min(int(p*700),190)
-                s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-                s.fill((30,100,220,a)); screen.blit(s,rect.topleft)
+                ui.alpha_rect(screen,rect,(*ui.BLUE,a))
                 if p>0.06:
-                    screen.blit(fl.render(f'{p*100:.0f}%',True,(255,255,255)),
-                                (rect.x+3,rect.y+3))
+                    ui.text_shadow(screen,f'{p*100:.0f}%',(rect.x+4,rect.y+3),
+                                   11,(255,255,255),bold=True)
 
         if top1 is not None and sq==top1:
-            pygame.draw.rect(screen,C_RED,rect,3)
+            pygame.draw.rect(screen,ui.RED,rect,3,border_radius=4)
 
         if sel_sq is not None and sq==sel_sq:
-            s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-            s.fill((20,200,20,150)); screen.blit(s,rect.topleft)
+            ui.alpha_rect(screen,rect,(20,200,20,110))
 
         if legal_sqs and sq in legal_sqs:
-            cx2=rect.x+SQUARE_SIZE//2; cy2=rect.y+SQUARE_SIZE//2
-            pygame.draw.circle(screen,(100,200,100),(cx2,cy2),8)
+            s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
+            pygame.draw.circle(s,(30,120,60,150),(SQUARE_SIZE//2,SQUARE_SIZE//2),9)
+            screen.blit(s,rect.topleft)
 
     for i,name in enumerate(trail):
         try:
             tsq=chess.parse_square(name); tc,tr=sq_cr(tsq,flipped)
             a=int(30+160*(i/max(len(trail),1)))
-            s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-            s.fill((255,140,40,a))
-            screen.blit(s,(BOARD_OFFSET+tc*SQUARE_SIZE,BOARD_OFFSET+tr*SQUARE_SIZE))
+            ui.alpha_rect(screen,(BOARD_X+tc*SQUARE_SIZE,BOARD_Y+tr*SQUARE_SIZE,
+                                  SQUARE_SIZE,SQUARE_SIZE),(*ui.ORANGE,a))
         except: pass
 
     if gaze_sq is not None:
         try:
             gc,gr=sq_cr(gaze_sq,flipped)
-            cx=BOARD_OFFSET+gc*SQUARE_SIZE+SQUARE_SIZE//2
-            cy=BOARD_OFFSET+gr*SQUARE_SIZE+SQUARE_SIZE//2
-            pygame.draw.circle(screen,C_GREEN,(cx,cy),14,3)
+            cx=BOARD_X+gc*SQUARE_SIZE+SQUARE_SIZE//2
+            cy=BOARD_Y+gr*SQUARE_SIZE+SQUARE_SIZE//2
+            ui.glow_circle(screen,(cx,cy),14,ui.GREEN,3)
         except: pass
 
     for sq in chess.SQUARES:
         p=board.piece_at(sq)
         if not p: continue
         sym=PIECES[p.piece_type][p.color]; col,row=sq_cr(sq,flipped)
-        cx=BOARD_OFFSET+col*SQUARE_SIZE+SQUARE_SIZE//2
-        cy=BOARD_OFFSET+row*SQUARE_SIZE+SQUARE_SIZE//2
-        screen.blit(fp.render(sym,True,(0,0,0)),
-                    fp.render(sym,True,(0,0,0)).get_rect(center=(cx+2,cy+2)))
-        clr=(255,255,255) if p.color==chess.WHITE else (25,25,25)
-        screen.blit(fp.render(sym,True,clr),
-                    fp.render(sym,True,clr).get_rect(center=(cx,cy)))
+        cx=BOARD_X+col*SQUARE_SIZE+SQUARE_SIZE//2
+        cy=BOARD_Y+row*SQUARE_SIZE+SQUARE_SIZE//2
+        draw_piece(screen,fp,sym,(cx,cy),p.color==chess.WHITE)
 
-    for i in range(8):
-        fn = chess.FILE_NAMES[7-i] if flipped else chess.FILE_NAMES[i]
-        rn = str(i+1) if flipped else str(8-i)
-        screen.blit(fl.render(fn,True,C_TEXT),
-                    (BOARD_OFFSET+i*SQUARE_SIZE+3,BOARD_OFFSET+BOARD_SIZE+4))
-        screen.blit(fl.render(rn,True,C_TEXT),
-                    (BOARD_OFFSET-18,BOARD_OFFSET+i*SQUARE_SIZE+SQUARE_SIZE//2-8))
-    pygame.draw.rect(screen,(70,70,70),
-                     (BOARD_OFFSET,BOARD_OFFSET,BOARD_SIZE,BOARD_SIZE),2)
+    draw_board_coords(screen,BOARD_X,BOARD_Y,SQUARE_SIZE,flipped)
 
 
-def draw_camera(screen,frame_bgr,cx_cam,cy_cam,r_cam,fu):
-    x0,y0 = PANEL_X, CAM_Y
-    pygame.draw.rect(screen,(70,70,70),(x0-2,y0-2,CAM_W+4,CAM_H+4),2)
+def draw_camera(screen,frame_bgr,cx_cam,cy_cam,r_cam):
+    rect = ui.card(screen,(PANEL_X,BOARD_Y,CAM_CARD_W,CAM_CARD_H),
+                   title="Pupil detection")
+    vx,vy = rect.x+12, rect.y+30
     if frame_bgr is not None:
         vis=frame_bgr.copy()
         if cx_cam is not None:
@@ -593,140 +592,145 @@ def draw_camera(screen,frame_bgr,cx_cam,cy_cam,r_cam,fu):
             cv2.line(vis,(cx_cam-12,cy_cam),(cx_cam+12,cy_cam),(255,255,255),1)
             cv2.line(vis,(cx_cam,cy_cam-12),(cx_cam,cy_cam+12),(255,255,255),1)
             cv2.circle(vis,(cx_cam,cy_cam),3,(0,0,255),-1)
-        rgb=cv2.cvtColor(cv2.resize(vis,(CAM_W,CAM_H)),cv2.COLOR_BGR2RGB)  # CAM_W x CAM_H
+        rgb=cv2.cvtColor(cv2.resize(vis,(CAM_W,CAM_VID_H)),cv2.COLOR_BGR2RGB)
         screen.blit(pygame.surfarray.make_surface(
-            np.transpose(rgb,(1,0,2))),(x0,y0))
-        s=pygame.Surface((CAM_W,20),pygame.SRCALPHA)
+            np.transpose(rgb,(1,0,2))),(vx,vy))
+        pygame.draw.rect(screen,ui.CARD_BORDER,(vx,vy,CAM_W,CAM_VID_H),1)
         if cx_cam is not None:
-            s.fill((0,130,0,170)); screen.blit(s,(x0,y0))
-            screen.blit(fu.render("● ZENICA DETEKTOVANA",True,(200,255,200)),(x0+6,y0+3))
-            screen.blit(fu.render(f"x={cx_cam}  y={cy_cam}  r={r_cam}",True,C_GREEN),
-                        (x0+4,y0+CAM_H-18))
+            ui.pill(screen,"PUPIL DETECTED",(vx+6,vy+6),ui.GREEN_DARK,(190,255,205))
+            ui.text(screen,f"cam ({cx_cam}, {cy_cam})   r = {r_cam}",
+                    (vx,vy+CAM_VID_H+8),11,ui.DIM)
         else:
-            s.fill((130,0,0,170)); screen.blit(s,(x0,y0))
-            screen.blit(fu.render("○ Tražim zenicu...",True,(255,180,180)),(x0+6,y0+3))
+            ui.pill(screen,"SEARCHING...",(vx+6,vy+6),ui.RED_DARK,(255,190,190))
     else:
-        pygame.draw.rect(screen,(40,40,40),(x0,y0,CAM_W,CAM_H))
-        screen.blit(fu.render("Nema kamere",True,C_DIM),(x0+10,y0+CAM_H//2))
-    screen.blit(fu.render("Detekcija zenice (CNN + Haar)",True,C_DIM),(x0,CAM_LBL_Y))
+        pygame.draw.rect(screen,ui.CARD_INNER,(vx,vy,CAM_W,CAM_VID_H),border_radius=6)
+        ui.text(screen,"No camera",(vx+CAM_W//2,vy+CAM_VID_H//2),12,ui.FAINT,
+                anchor='center')
+    ui.text(screen,"MediaPipe · CNN · Haar",(rect.right-12,rect.y+10),10,ui.FAINT,
+            anchor='topright')
 
 
-def draw_bar(screen,probs,fu):
-    x0=PANEL_X; y0=BAR_Y; w=PANEL_W; h=BAR_H
-    pygame.draw.rect(screen,(38,38,38),(x0,y0,w,h))
-    screen.blit(fu.render("Verovatnoce — Top 10",True,C_TEXT),(x0,BAR_LBL_Y))
+def draw_bar(screen,probs):
+    rect = ui.card(screen,(PANEL_X,CHART_Y,PANEL_W,CHART_H),
+                   title="Prediction — Top 10")
+    x0=rect.x+12; y0=rect.y+34
     if probs is None or probs.max()<0.001:
-        screen.blit(fu.render("Gledaj u tablu...",True,C_DIM),(x0+8,y0+h//2)); return
+        ui.text(screen,"Look at the board...",(rect.centerx,rect.centery),
+                13,ui.FAINT,anchor='center')
+        return
     top10=np.argsort(probs)[::-1][:10]; maxp=probs[top10[0]]
-    lw=30; bmax=w-lw-52; bh=max(1,(h-14)//10-3)
+    lw=34; pct_w=52
+    bmax=rect.width-24-lw-pct_w
+    row_h=(rect.height-44)//10
+    bh=min(row_h-6,14)
     for i,sq_idx in enumerate(top10):
         p=probs[sq_idx]; nm=idx_to_square(sq_idx)
-        bw=int((p/max(maxp,1e-6))*bmax); yy=y0+8+i*(bh+3)
-        pygame.draw.rect(screen,C_RED if i==0 else (50,110,195),(x0+lw,yy,bw,bh))
-        pygame.draw.rect(screen,(60,60,60),(x0+lw,yy,bmax,bh),1)
-        screen.blit(fu.render(nm,True,C_TEXT),(x0+2,yy))
-        screen.blit(fu.render(f"{p*100:.1f}%",True,C_DIM),(x0+lw+bmax+4,yy))
+        bw=int((p/max(maxp,1e-6))*bmax); yy=y0+i*row_h
+        ui.text(screen,nm,(x0,yy+(bh-16)//2),12,
+                ui.TEXT if i==0 else ui.DIM,bold=(i==0))
+        pygame.draw.rect(screen,(46,51,64),(x0+lw,yy,bmax,bh),
+                         border_radius=bh//2)
+        if bw>=bh:
+            pygame.draw.rect(screen,ui.RED if i==0 else ui.BLUE,
+                             (x0+lw,yy,bw,bh),border_radius=bh//2)
+        ui.text(screen,f"{p*100:.1f}%",(x0+lw+bmax+pct_w-4,yy+(bh-16)//2),11,
+                ui.TEXT if i==0 else ui.DIM,anchor='topright')
 
 
 def draw_result_overlay(screen, board, probs, move_san,
-                        played_sq, predicted_sq, fp, fl, fu, fb,
+                        played_sq, predicted_sq, fp,
                         flipped=False):
     """
-    Prediction overlay after the move is made
-    # blue - probabilites
-    # green frame - move played
-    # red frame - move predicted (top 1)
-    # bar chart with top 10 predictions
+    Prediction overlay shown after a move is played:
+    blue heatmap = model probabilities, green frame = move played,
+    red frame = top-1 prediction, bar chart with top 10 predictions.
     """
-    overlay = pygame.Surface((WINDOW_W, WINDOW_H), pygame.SRCALPHA)
-    overlay.fill((0,0,0,190))
-    screen.blit(overlay,(0,0))
+    ui.alpha_rect(screen,(0,0,WINDOW_W,WINDOW_H),(8,9,12,200))
 
-   
     PAD = 20
     px, py = PAD, PAD
     pw = WINDOW_W - 2*PAD
     ph = WINDOW_H - 2*PAD
-    pygame.draw.rect(screen,(28,28,28),(px,py,pw,ph),border_radius=10)
-    pygame.draw.rect(screen,(80,80,80),(px,py,pw,ph),2,border_radius=10)
+    pygame.draw.rect(screen,ui.CARD,(px,py,pw,ph),border_radius=14)
+    pygame.draw.rect(screen,ui.CARD_BORDER,(px,py,pw,ph),1,border_radius=14)
 
-    # Top text
+    # Title row
     played_name    = chess.square_name(played_sq)
     predicted_name = idx_to_square(predicted_sq)
     hit = (played_sq == predicted_sq)
-    title = fb.render(
-        f"Potez: {move_san}  |  Prediction: {predicted_name}",
-        True, C_GREEN if hit else C_TEXT)
-    screen.blit(title, title.get_rect(center=(WINDOW_W//2, py+22)))
+    tr = ui.text(screen,f"Move: {move_san}   ·   Predicted: {predicted_name}",
+                 (WINDOW_W//2, py+24),18,ui.TEXT,bold=True,anchor='center')
+    if hit:
+        ui.pill(screen,"HIT",(tr.right+14,tr.centery),ui.GREEN_DARK,
+                (190,255,205),anchor='midleft')
+    else:
+        ui.pill(screen,"MISS",(tr.right+14,tr.centery),ui.RED_DARK,
+                (255,190,190),anchor='midleft')
 
-    leg_y = py + 44
-    pygame.draw.rect(screen, C_GREEN, (px+10, leg_y, 12, 12), 3)
-    screen.blit(fu.render(f"= played ({played_name})", True, C_TEXT), (px+26, leg_y))
+    # Legend
+    leg_y = py + 48
+    pygame.draw.rect(screen, ui.GREEN, (px+16, leg_y, 12, 12), 3, border_radius=3)
+    ui.text(screen,f"played ({played_name})",(px+34,leg_y-2),12,ui.DIM)
     if predicted_sq != played_sq:
-        pygame.draw.rect(screen, C_RED, (px+200, leg_y, 12, 12), 3)
-        screen.blit(fu.render(f"= prediction ({predicted_name})", True, C_TEXT), (px+216, leg_y))
-    screen.blit(fu.render("SPACE = next puzzle", True, C_YELLOW),
-                (pw - 160, leg_y))
+        pygame.draw.rect(screen, ui.RED, (px+180, leg_y, 12, 12), 3, border_radius=3)
+        ui.text(screen,f"predicted ({predicted_name})",(px+198,leg_y-2),12,ui.DIM)
+    hx = px+pw-220
+    ui.hints(screen,(hx,leg_y-3),[("SPACE","next puzzle")])
 
+    content_y  = leg_y + 24
+    content_h  = ph - (content_y - py) - 14
 
-    content_y  = leg_y + 20
-    content_h  = ph - (content_y - py) - 10
-   
-    sq_s       = min(content_h // 8, (pw - 40) // 12) 
+    sq_s       = min(content_h // 8, (pw - 40) // 12)
     board_px   = sq_s * 8
-    bx         = px + 10
+    bx         = px + 16
     by         = content_y
 
     # Heatmap
     for sq in chess.SQUARES:
         col, row = sq_cr(sq, flipped=flipped) # keep the orientation
         rect = pygame.Rect(bx+col*sq_s, by+row*sq_s, sq_s, sq_s)
-        pygame.draw.rect(screen, C_LIGHT if (col+row)%2==0 else C_DARK, rect)
+        pygame.draw.rect(screen, ui.BOARD_LIGHT if (col+row)%2==0 else ui.BOARD_DARK, rect)
 
         if probs is not None:
             p = probs[sq]
             if p > 0.008:
                 a = min(int(p*800), 200)
-                s = pygame.Surface((sq_s,sq_s), pygame.SRCALPHA)
-                s.fill((30,100,220,a)); screen.blit(s,rect.topleft)
+                ui.alpha_rect(screen,rect,(*ui.BLUE,a))
                 if p > 0.04:
-                    screen.blit(fu.render(f'{p*100:.0f}%',True,(255,255,255)),
-                                (rect.x+2,rect.y+2))
+                    ui.text_shadow(screen,f'{p*100:.0f}%',(rect.x+3,rect.y+2),
+                                   10,(255,255,255),bold=True)
         if sq == played_sq:
-            pygame.draw.rect(screen, C_GREEN, rect, 4)
+            pygame.draw.rect(screen, ui.GREEN, rect, 4, border_radius=4)
         if sq == predicted_sq and predicted_sq != played_sq:
-            pygame.draw.rect(screen, C_RED, rect, 3)
+            pygame.draw.rect(screen, ui.RED, rect, 3, border_radius=4)
 
-    font_mini = pygame.font.SysFont('segoeuisymbol', max(sq_s-6,12))
+    font_mini = ui.piece_font(max(sq_s-6,12))
     for sq in chess.SQUARES:
         p = board.piece_at(sq)
         if not p: continue
         sym = PIECES[p.piece_type][p.color]
         col, row = sq_cr(sq, flipped=flipped)
         cx = bx+col*sq_s+sq_s//2; cy = by+row*sq_s+sq_s//2
-        clr = (255,255,255) if p.color==chess.WHITE else (25,25,25)
-        screen.blit(font_mini.render(sym,True,(0,0,0)),
-                    font_mini.render(sym,True,(0,0,0)).get_rect(center=(cx+1,cy+1)))
-        screen.blit(font_mini.render(sym,True,clr),
-                    font_mini.render(sym,True,clr).get_rect(center=(cx,cy)))
+        draw_piece(screen,font_mini,sym,(cx,cy),p.color==chess.WHITE)
 
     # Board coordinates
     for i in range(8):
-        screen.blit(fl.render(chess.FILE_NAMES[i],True,C_DIM),
-                    (bx+i*sq_s+2, by+board_px+2))
+        fn = chess.FILE_NAMES[7-i] if flipped else chess.FILE_NAMES[i]
+        ui.text(screen,fn,(bx+i*sq_s+sq_s//2, by+board_px+4),10,ui.FAINT,
+                anchor='midtop')
 
     # Bar chart
     if probs is not None:
-        bx2     = bx + board_px + 20
-        by2     = by
-        bar_w   = pw - board_px - 50      
-        lbl_w   = 32
-        pct_w   = 42
+        bx2     = bx + board_px + 28
+        by2     = by + 20
+        bar_w   = px + pw - bx2 - 20
+        lbl_w   = 34
+        pct_w   = 48
         bar_max = bar_w - lbl_w - pct_w - 8
-        row_h   = content_h // 10
-        bh      = max(row_h - 5, 8)
+        row_h   = (content_h - 24) // 10
+        bh      = min(max(row_h - 6, 8), 14)
 
-        screen.blit(fu.render("Top-10", True, C_TEXT), (bx2, by2-16))
+        ui.text(screen,"TOP 10 PREDICTIONS",(bx2,by-2),11,ui.DIM,bold=True)
 
         top10 = np.argsort(probs)[::-1][:10]
         max_p = probs[top10[0]]
@@ -735,32 +739,85 @@ def draw_result_overlay(screen, board, probs, move_san,
             p   = probs[sq_idx]
             nm  = idx_to_square(sq_idx)
             bw  = int((p/max(max_p,1e-6))*bar_max)
-            yy  = by2 + i*row_h + 2
+            yy  = by2 + i*row_h
 
-            if sq_idx == played_sq:    col_bar = C_GREEN
-            elif i == 0:               col_bar = C_RED
-            else:                      col_bar = (50,110,195)
+            if sq_idx == played_sq:    col_bar = ui.GREEN
+            elif i == 0:               col_bar = ui.RED
+            else:                      col_bar = ui.BLUE
 
-            pygame.draw.rect(screen, col_bar,    (bx2+lbl_w, yy, bw, bh))
-            pygame.draw.rect(screen, (60,60,60), (bx2+lbl_w, yy, bar_max, bh), 1)
-            screen.blit(fu.render(nm,  True, C_TEXT), (bx2+2,              yy))
-            screen.blit(fu.render(f"{p*100:.1f}%", True, C_DIM),
-                        (bx2+lbl_w+bar_max+4, yy))
+            ui.text(screen,nm,(bx2,yy+(bh-16)//2),12,
+                    ui.TEXT if i==0 or sq_idx==played_sq else ui.DIM,
+                    bold=(i==0 or sq_idx==played_sq))
+            pygame.draw.rect(screen,(46,51,64),(bx2+lbl_w,yy,bar_max,bh),
+                             border_radius=bh//2)
+            if bw>=bh:
+                pygame.draw.rect(screen,col_bar,(bx2+lbl_w,yy,bw,bh),
+                                 border_radius=bh//2)
+            ui.text(screen,f"{p*100:.1f}%",(bx2+lbl_w+bar_max+pct_w,yy+(bh-16)//2),
+                    11,ui.DIM,anchor='topright')
 
 
+def draw_info_panel(screen, puzzle_no, n_puzzles, desc, mode_et, gaze_seq,
+                    top1_nm):
+    rect = ui.card(screen,(INFO_X,BOARD_Y,INFO_W,CAM_CARD_H),title="Session")
+    x = rect.x+12
+    ui.text(screen,f"Puzzle {puzzle_no}/{n_puzzles}",(x,rect.y+28),15,
+            ui.TEXT,bold=True)
+    ui.text(screen,desc[:26],(x,rect.y+52),12,ui.DIM)
+    if mode_et:
+        ui.pill(screen,"EYE TRACKER",(x,rect.y+74),ui.GREEN_DARK,(190,255,205))
+    else:
+        ui.pill(screen,"MOUSE MODE",(x,rect.y+74),ui.BLUE_DARK,(180,205,255))
+
+    ui.text(screen,"GAZE SEQUENCE",(x,rect.y+102),10,ui.FAINT,bold=True)
+    seq_fields = list(gaze_seq)[-6:]
+    if seq_fields:
+        ui.chips(screen,seq_fields,(x,rect.y+118),INFO_W-24)
+    else:
+        ui.text(screen,"—",(x,rect.y+118),12,ui.FAINT)
+
+    pygame.draw.line(screen,ui.CARD_BORDER,(x,rect.y+166),
+                     (rect.right-12,rect.y+166))
+    ui.text(screen,"Top-1 prediction",(x,rect.y+178),11,ui.DIM)
+    ui.text(screen,top1_nm,(rect.right-14,rect.y+172),18,ui.GREEN,
+            bold=True,anchor='topright')
 
 
+def draw_mode_select(screen, has_calib):
+    screen.fill(ui.BG)
+    ui.header(screen,WINDOW_W,"Eye-Tracking Chess",
+              "Transformer-based move prediction from gaze")
+    cw, ch = 480, 250
+    rect = ui.card(screen,((WINDOW_W-cw)//2,(WINDOW_H-ch)//2-20,cw,ch),
+                   radius=14)
+    ui.text(screen,"Choose input mode",(rect.centerx,rect.y+30),17,
+            ui.TEXT,bold=True,anchor='center')
+    rows = [
+        ("M","Mouse mode","recommended — mouse acts as gaze proxy",True),
+        ("L","Load saved calibration",
+         "use previous 9-point calibration" if has_calib else "no saved calibration found",
+         has_calib),
+        ("N","New calibration","9-point eye-tracking calibration",True),
+    ]
+    y = rect.y+64
+    for key,label,sub,enabled in rows:
+        kr = ui.keycap(screen,key,(rect.x+28,y+4),13)
+        ui.text(screen,label,(rect.x+70,y),14,
+                ui.TEXT if enabled else ui.FAINT,bold=True)
+        ui.text(screen,sub,(rect.x+70,y+20),11,
+                ui.DIM if enabled else ui.FAINT)
+        y += 56
+    ui.text(screen,"ESC also starts mouse mode",(rect.centerx,rect.bottom+24),
+            11,ui.FAINT,anchor='center')
+    pygame.display.flip()
 
 
 def run():
     pygame.init()
     screen=pygame.display.set_mode((WINDOW_W,WINDOW_H))
-    pygame.display.set_caption("Eye-tracking Chess — Puzzle Demo")
+    pygame.display.set_caption("Eye-Tracking Chess — Puzzle Demo")
 
-    fp=pygame.font.SysFont('segoeuisymbol',SQUARE_SIZE-10)
-    fl=pygame.font.SysFont('arial',13)
-    fu=pygame.font.SysFont('arial',13)
-    fb=pygame.font.SysFont('arial',20,bold=True)
+    fp=ui.piece_font(SQUARE_SIZE-10)
 
     device=torch.device('cpu')
     transformer=load_transformer(TRANSFORMER_PATH,device)
@@ -778,34 +835,22 @@ def run():
     # Calibration
     H_calib=None; use_et=(cap is not None)
     if use_et:
-        screen.fill((20,20,20))
         has_calib = os.path.exists(CALIB_FILE)
-        # Default: mouse
-        # keep eye tracking as an option (not rly working :( )
-        options = [
-            ("Eye-tracking Chess — Demo", True),
-            ("", False),
-            ("M =  Mouse mode  (recommended)", False),
-            ("L  =  Load calibration" if has_calib else "  calibration doesn't exist", False),
-            ("N  =  New Calibration (9 dots)", False),
-        ]
-        for i,(ln,bold) in enumerate(options):
-            if not ln: continue
-            f=fb if bold else fu
-            col=C_TEXT if bold else (C_GREEN if i==2 else C_DIM)
-            t=f.render(ln,True,col)
-            screen.blit(t,t.get_rect(center=(WINDOW_W//2,WINDOW_H//2-60+i*34)))
-        pygame.display.flip()
+        # Default: mouse; eye tracking kept as an option
+        draw_mode_select(screen, has_calib)
         waiting=True
         while waiting:
             for ev in pygame.event.get():
+                if ev.type==pygame.QUIT:
+                    if cap: cap.release()
+                    pygame.quit(); return
                 if ev.type==pygame.KEYDOWN:
                     if ev.key==pygame.K_n:
-                        H_calib=run_calibration(screen,cap,fb,fu,cnn_model,device); waiting=False
+                        H_calib=run_calibration(screen,cap,cnn_model,device); waiting=False
                     elif ev.key==pygame.K_l and has_calib:
                         loaded = np.load(CALIB_FILE, allow_pickle=True)
                         H_calib = loaded.item() if loaded.ndim == 0 else loaded
-                        print("Kalibracija ucitana."); waiting=False
+                        print("Calibration loaded."); waiting=False
                     elif ev.key in (pygame.K_m, pygame.K_ESCAPE):
                         use_et=False; waiting=False
 
@@ -840,7 +885,7 @@ def run():
     move_san_str   =""
     predicted_sq_ov=None
     played_sq_ov   =None
-    overlay_flipped=False  # orijentacija table u trenutku poteza
+    overlay_flipped=False  # board orientation at the moment of the move
 
     print("Demo: solve puzzles! ESC=exit  K=calibrate  SPACE(overlay)=next")
 
@@ -878,7 +923,7 @@ def run():
 
         # map to square
         res=screen_to_square(gx,gy,
-                              board_x=BOARD_OFFSET,board_y=BOARD_OFFSET,
+                              board_x=BOARD_X,board_y=BOARD_Y,
                               board_w=BOARD_SIZE,board_h=BOARD_SIZE,
                               flipped=flipped)
         if res['valid']:
@@ -919,11 +964,11 @@ def run():
                     if cap: cap.release()
                     pygame.quit(); return
                 elif ev.key==pygame.K_k and cap:
-                    H_calib=run_calibration(screen,cap,fb,fu,cnn_model,device)
+                    H_calib=run_calibration(screen,cap,cnn_model,device)
                     use_et=(H_calib is not None)
                     gaze_filt.reset()
                 elif ev.key==pygame.K_SPACE and show_overlay:
-                    # Sledeća puzla
+                    # Next puzzle
                     puzzle_idx+=1
                     board,solution_uci,desc=load_puzzle(puzzle_idx)
                     solution_move=chess.Move.from_uci(solution_uci)
@@ -933,9 +978,9 @@ def run():
                     sel_sq=None; show_overlay=False; gaze_filt.reset()
 
             elif ev.type==pygame.MOUSEBUTTONDOWN and ev.button==1 and not show_overlay:
-                # Klik na tablu — igranje poteza
+                # Click on the board — play a move
                 res2=screen_to_square(mx,my,
-                                       board_x=BOARD_OFFSET,board_y=BOARD_OFFSET,
+                                       board_x=BOARD_X,board_y=BOARD_Y,
                                        board_w=BOARD_SIZE,board_h=BOARD_SIZE,
                                        flipped=flipped)
                 if not res2['valid']:
@@ -971,88 +1016,59 @@ def run():
                         else: sel_sq=None
 
 
-        screen.fill(C_BG)
-        pygame.draw.rect(screen,C_PANEL,(PANEL_X-10,0,WINDOW_W-PANEL_X+10,WINDOW_H))
+        screen.fill(ui.BG)
 
-        draw_board(screen,board,fp,fl,
+        mode_et = use_et and H_calib is not None
+        ui.header(screen,WINDOW_W,"Eye-Tracking Chess",
+                  "Transformer-based move prediction from gaze",
+                  right_pill=(("EYE TRACKER",ui.GREEN_DARK,(190,255,205))
+                              if mode_et else
+                              ("MOUSE MODE",ui.BLUE_DARK,(180,205,255))))
+
+        draw_board(screen,board,fp,
                    None if show_overlay else probs,
                    gaze_seq,gaze_sq,sel_sq,legal_sqs,flipped=flipped)
 
-        draw_camera(screen,frame_bgr,cx_cam,cy_cam,r_cam,fu)
-        draw_bar(screen,None if show_overlay else probs,fu)
-        # + for gaze
+        draw_camera(screen,frame_bgr,cx_cam,cy_cam,r_cam)
+        draw_bar(screen,None if show_overlay else probs)
+
+        # gaze crosshair
         if not show_overlay and 0<=gx<WINDOW_W and 0<=gy<WINDOW_H:
-            pygame.draw.circle(screen,C_YELLOW,(gx,gy),14,2)
-            pygame.draw.line(screen,C_YELLOW,(gx-18,gy),(gx+18,gy),2)
-            pygame.draw.line(screen,C_YELLOW,(gx,gy-18),(gx,gy+18),2)
-            pygame.draw.circle(screen,C_YELLOW,(gx,gy),3)
+            ui.glow_circle(screen,(gx,gy),14,ui.AMBER,2)
+            pygame.draw.line(screen,ui.AMBER,(gx-20,gy),(gx-8,gy),2)
+            pygame.draw.line(screen,ui.AMBER,(gx+8,gy),(gx+20,gy),2)
+            pygame.draw.line(screen,ui.AMBER,(gx,gy-20),(gx,gy-8),2)
+            pygame.draw.line(screen,ui.AMBER,(gx,gy+8),(gx,gy+20),2)
+            pygame.draw.circle(screen,ui.AMBER,(gx,gy),3)
 
-    
-        mode = "Eye-tracker" if use_et and H_calib is not None else "Mouse (proxy for gaze)"
-        sx_dbg,sy_dbg = gaze_filt.get() if use_et else (None,None)
         top1_nm = idx_to_square(int(np.argmax(probs))) if len(gaze_seq)>=1 else "..."
-        puzla_br = puzzle_idx % len(puzzles) + 1
+        puzzle_no = puzzle_idx % len(puzzles) + 1
 
-        pygame.draw.rect(screen,(40,40,40),
-                         (INFO_X, INFO_Y, INFO_W, TOP_H), border_radius=6)
-        pygame.draw.rect(screen,(65,65,65),
-                         (INFO_X, INFO_Y, INFO_W, TOP_H), 1, border_radius=6)
+        draw_info_panel(screen,puzzle_no,len(puzzles),desc,mode_et,
+                        gaze_seq,top1_nm)
 
-        pygame.draw.line(screen,(65,65,65),
-                         (PANEL_X, BAR_Y-4),(PANEL_X+PANEL_W, BAR_Y-4),1)
+        # keyboard hints under the board (the overlay has its own hint)
+        hint_y = BOARD_Y+BOARD_SIZE+16
+        if not show_overlay:
+            ui.hints(screen,(BOARD_X,hint_y),[("K","calibrate"),("ESC","quit")])
 
-        fb13 = pygame.font.SysFont('arial',13,bold=True)
-        fu13 = pygame.font.SysFont('arial',13)
-
-        y_i = INFO_Y + 8
-  
-        screen.blit(fb13.render(f"Puzzle {puzla_br}/{len(puzzles)}",True,C_TEXT),
-                    (INFO_X+6, y_i)); y_i+=18
-        
-        # for debug
-        if sx_dbg is not None and H_calib is not None:
+        # pupil debug readout (eye-tracking mode)
+        sx_dbg,sy_dbg = gaze_filt.get() if use_et else (None,None)
+        if show_overlay:
+            pass
+        elif sx_dbg is not None and H_calib is not None:
             gx_d,gy_d = pupil_to_screen(sx_dbg,sy_dbg,H_calib)
-            screen.blit(fu13.render(f"Pupil on camera: ({sx_dbg},{sy_dbg})",True,C_DIM),(INFO_X+6,y_i)); y_i+=15
-            screen.blit(fu13.render(f"On screen:  ({gx_d},{gy_d})",True,C_YELLOW),(INFO_X+6,y_i)); y_i+=15
+            ui.text(screen,f"pupil ({sx_dbg}, {sy_dbg})  →  screen ({gx_d}, {gy_d})",
+                    (BOARD_X+BOARD_SIZE,hint_y+3),11,ui.FAINT,anchor='topright')
         elif sx_dbg is not None:
-            screen.blit(fu13.render(f"Pupil: ({sx_dbg},{sy_dbg})",True,C_DIM),(INFO_X+6,y_i)); y_i+=15
-            screen.blit(fu13.render("No calibration!",True,C_RED),(INFO_X+6,y_i)); y_i+=15
-        # Opis puzle (max 22 znaka)
-        screen.blit(fu13.render(desc[:22],True,C_DIM),(INFO_X+6,y_i)); y_i+=22
+            ui.text(screen,f"pupil ({sx_dbg}, {sy_dbg})  —  not calibrated",
+                    (BOARD_X+BOARD_SIZE,hint_y+3),11,ui.RED,anchor='topright')
 
-        # Separator
-        pygame.draw.line(screen,(60,60,60),(INFO_X+4,y_i),(INFO_X+INFO_W-4,y_i),1)
-        y_i+=8
-
-        # Mod
-        mc = C_GREEN if use_et and H_calib is not None else C_DIM
-        screen.blit(fu13.render(f"Mod: {mode}",True,mc),(INFO_X+6,y_i)); y_i+=18
-
-        # Sekvenca — prelom posle 3 polja
-        seq_fields = list(gaze_seq)[-6:] or ['...']
-        screen.blit(fu13.render("Seq:",True,C_DIM),(INFO_X+6,y_i)); y_i+=16
-        line = ""
-        for sq_nm in seq_fields:
-            if len(line)+len(sq_nm)+1 > 16:
-                screen.blit(fu13.render(line.strip(),True,C_ORANGE),(INFO_X+10,y_i))
-                y_i+=15; line=""
-            line += sq_nm+" "
-        if line.strip():
-            screen.blit(fu13.render(line.strip(),True,C_ORANGE),(INFO_X+10,y_i)); y_i+=15
-
-        # Top-1
-        y_i = max(y_i, INFO_Y+TOP_H-38)
-        screen.blit(fb13.render(f"Top-1: {top1_nm}",True,C_GREEN),(INFO_X+6,y_i)); y_i+=18
-
-        # Kontrole
-        screen.blit(fu13.render("K=calibrate ESC=exit",True,C_DIM),(INFO_X+6,y_i)); y_i+=16
-        screen.blit(fu13.render("SPACE=next puzzle",True,C_DIM),(INFO_X+6,y_i))
-
-        # Overlay posle poteza
+        # Overlay after the move
         if show_overlay and board_before is not None:
             draw_result_overlay(screen,board_before,overlay_probs,
                                 move_san_str,
-                                played_sq_ov,predicted_sq_ov,fp,fl,fu,fb,
+                                played_sq_ov,predicted_sq_ov,fp,
                                 flipped=overlay_flipped)
 
         pygame.display.flip()
