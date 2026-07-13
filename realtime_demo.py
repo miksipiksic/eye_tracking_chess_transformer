@@ -65,9 +65,9 @@ PIECES = {
 
 # Puzzles if there is no csv with lichess puzzles
 FALLBACK_PUZZLES = [
-    {'fen':'4k3/8/4K3/4R3/8/8/8/8 w - - 0 1','solution':'e5e8','desc':'Mate in 1 — rook to e8'},
+    {'fen':'4k3/8/4K3/7R/8/8/8/8 w - - 0 1','solution':'h5h8','desc':'Mate in 1 — rook to h8'},
     {'fen':'6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1','solution':'e1e8','desc':'Rook to the 8th rank'},
-    {'fen':'r3k2r/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R4RK1 w kq - 0 1','solution':'f1f8','desc':'Rook attack'},
+    {'fen':'6k1/5ppp/8/8/8/8/5PPP/3Q2K1 w - - 0 1','solution':'d1d8','desc':'Back-rank mate — queen to d8'},
     {'fen':'8/8/8/3k4/8/3K4/8/4R3 w - - 0 1','solution':'e1e5','desc':'Rook to the 5th rank'},
     {'fen':'r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4',
      'solution':'f3g5','desc':'Attack on f7'},
