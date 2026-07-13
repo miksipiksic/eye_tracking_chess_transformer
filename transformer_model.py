@@ -1,7 +1,7 @@
 """
 transformer_model.py — Encoder-Decoder Transformer 
 
-Prilagođavanja:
+Adaptations:
   - Vocab: 66 tokens
   - Encoder input: squares noticed [e4, d5, e5, ...]
   - Decoder input: [SOS] token + autoreg next move prediction
@@ -264,7 +264,7 @@ class Transformer(nn.Module):
 
 
 def build_transformer(
-        source_vocab_size: int  = VOCAB_SIZE,  # nije korišćen, zadržan za kompatibilnost
+        source_vocab_size: int  = VOCAB_SIZE,  # unused, kept for compatibility
         target_vocab_size: int  = TARGET_VOCAB_SIZE,
         source_context_size: int = 20,
         target_context_size: int = 2,

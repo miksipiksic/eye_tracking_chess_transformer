@@ -39,11 +39,11 @@ class EyeDataset(Dataset):
         self.img_size = img_size
         self.augment  = augment
 
-        # Učitavamo slike iz NPZ (arr_0 = originalne slike bez tačke)
+        # Load images from NPZ (arr_0 = original images without the dot)
         npz = np.load(npz_path, allow_pickle=True)
         self.images = npz['arr_0']   # (261, 256, 256, 3), float32
 
-        # Učitavamo labele iz CSV
+        # Load labels from CSV
         df = pd.read_csv(csv_path)
 
         # arr_0 ima 261 slika, annotation.csv ima 252 reda

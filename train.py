@@ -70,7 +70,7 @@ def train(config):
     os.makedirs(save_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Uređaj: {device}")
+    print(f"Device: {device}")
 
     # ── Podaci ──────────────────────────────────────────────────────────────
     print("\nLoading data...")

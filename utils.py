@@ -56,7 +56,7 @@ def visualize_predictions(model, loader, device,
 
         # Exact pupil - green dot
         ax.add_patch(patches.Circle((tx, ty), tr,
-                     color='lime', fill=False, lw=1.8, label='Tačno'))
+                     color='lime', fill=False, lw=1.8, label='True'))
         # Predicted pupil - red circle
         ax.add_patch(patches.Circle((px, py), pr,
                      color='red', fill=False, lw=1.8,
@@ -213,4 +213,4 @@ if __name__ == '__main__':
         print(f"  {sym}  ({x:4d},{y:4d}) → {str(got):4}  "
               f"(expected: {str(exp):4})")
 
-    print(f"\n{'Tests passed!' if ok else 'MISTAKES AVAILABLE!'}")
+    print(f"\n{'Tests passed!' if ok else 'TESTS FAILED!'}")

@@ -137,7 +137,7 @@ def train(config):
     os.makedirs(save_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Uređaj: {device}")
+    print(f"Device: {device}")
 
     # Data
     print("\nLoading data...")
@@ -233,9 +233,9 @@ def train(config):
     print(f"Test Top-1 Acc: {te1*100:.1f}%   (random baseline = 1.6%)")
     print(f"Test Top-3 Acc: {te3*100:.1f}%")
     print(f"Test Top-5 Acc: {te5*100:.1f}%")
-    print(f"Test ADE:       {te_ade:.2f} sqaures  (0=perfect, 7=max mistake)")
+    print(f"Test ADE:       {te_ade:.2f} squares  (0=perfect, 7=max mistake)")
     te_fde = te_ade  # single-step: FDE = ADE
-    print(f"Test FDE:       {te_fde:.2f} sqaures  (Final Displacement Error)")
+    print(f"Test FDE:       {te_fde:.2f} squares  (Final Displacement Error)")
 
     # Examples
     print("\nPrediction Examples(Top-3):")
@@ -262,7 +262,7 @@ def train(config):
         # Sequence 
         seq = [idx_to_square(t.item()) for t in x_sample[i]
                if t.item() != 64][-5:]
-        print(f"  {hit} Pogled: ...{seq}  →  Tačno: {true_sq}  "
+        print(f"  {hit} Gaze: ...{seq}  →  True: {true_sq}  "
               f"Pred: {top3_sq}")
 
     torch.save(history, os.path.join(save_dir, 'transformer_history.pth'))
@@ -279,13 +279,13 @@ if __name__ == '__main__':
         'learning_rate':         3e-4,
         'save_dir':              'checkpoints',
         'patience':               40,
-        # 2024 poteza, 44 partija
+        # 2024 moves, 44 games
         'model_dimension':        64,
         'number_of_blocks':        2,
         'heads':                   4,
         'dropout':               0.2,
         'feed_forward_dimension': 256,
-        'test_games':             12,    # ~260 test poteza
+        'test_games':             12,    # ~260 test moves
     }
 
     model, history = train(config)
