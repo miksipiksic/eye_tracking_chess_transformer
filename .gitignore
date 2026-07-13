@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editors
+.vscode/
+.idea/
+
+# Generated at runtime
+checkpoints/calibration.npy
+
+# Large external datasets (see README)
+data/lichess_puzzles.csv
