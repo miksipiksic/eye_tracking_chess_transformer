@@ -1,18 +1,18 @@
 """
-collect_data.py — training
+collectdata.py — training-data collection
 
 Modes:
-  GAME   — against the bot/stockfish - choose the color
+  GAME   — play against the bot/Stockfish, choose your color
   PUZZLE — solve lichess puzzles
 
   pip install pygame python-chess
-  python src/collect_data.py
+  python collectdata.py
 
 Keys — GAME mode:
   N       — new game
   Z       — undo move (your move + bot move)
   ESC     — back to menu
-  F       — flip board 
+  F       — flip board
 
 Keys — PUZZLE mode:
   ENTER / N  — next puzzle
@@ -25,7 +25,7 @@ Keys — MENU:
   3 / P   — puzzles
   ESC / Q — exit
 
-Use keys so that you don't move the mouse all the time. 
+Use the keys so that you don't move the mouse all the time.
 The mouse should follow eye movements.
 """
 
@@ -37,37 +37,36 @@ import csv
 import os
 from collections import deque
 
-WINDOW_W      = 860
-WINDOW_H      = 680
-BOARD_OFFSET  = 40
+import ui_theme as ui
+
+MARGIN        = 24
+BOARD_X       = MARGIN
+BOARD_Y       = ui.HEADER_H + 20
 BOARD_SIZE    = 560
 SQUARE_SIZE   = BOARD_SIZE // 8
-PANEL_X       = BOARD_OFFSET + BOARD_SIZE + 20
-BUTTON_W      = 160
-BUTTON_H      = 36
+PANEL_X       = BOARD_X + BOARD_SIZE + 24
+PANEL_W       = 220
+BUTTON_W      = PANEL_W
+BUTTON_H      = 40
+WINDOW_W      = PANEL_X + PANEL_W + MARGIN
+WINDOW_H      = BOARD_Y + BOARD_SIZE + 44
 OUTPUT_CSV    = 'data/gaze_dataset.csv'
 GAZE_WINDOW   = 20
 BOT_DELAY_MS  = 700
-STOCKFISH_PATH = "STOCKFISH_PATH"
+STOCKFISH_PATH = os.environ.get('STOCKFISH_PATH', '')
 
 # download lichess database .csv file
 # https://database.lichess.org/#puzzles
 FALLBACK_PUZZLES = [
     {'fen': 'r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4',
-     'solution': 'f3g5', 'desc': 'Napad na f7'},
+     'solution': 'f3g5', 'desc': 'Attack on f7'},
     {'fen': '4k3/8/4K3/4R3/8/8/8/8 w - - 0 1',
-     'solution': 'e5e8', 'desc': 'Mat u 1'},
+     'solution': 'e5e8', 'desc': 'Mate in 1'},
     {'fen': 'r4rk1/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R4RK1 w - - 0 1',
-     'solution': 'f1f8', 'desc': 'Napad topom'},
+     'solution': 'f1f8', 'desc': 'Rook attack'},
 ]
-PUZZLES = FALLBACK_PUZZLES   
-PUZZLE_CSV = 'data/lichess_puzzles.csv'  
-
-C_LIGHT = (240,217,181); C_DARK = (181,136,99); C_BG = (30,30,30)
-C_PANEL = (45,45,45);    C_TEXT = (220,220,220); C_DIM = (140,140,140)
-C_GREEN = (80,200,80);   C_BLUE = (80,140,220);  C_YELLOW = (220,200,60)
-C_RED   = (220,80,80);   C_BTN  = (65,65,65);    C_BTN_H = (90,90,90)
-C_ACT   = (50,130,50)
+PUZZLES = FALLBACK_PUZZLES
+PUZZLE_CSV = 'data/lichess_puzzles.csv'
 
 PIECES = {
     chess.PAWN:   {chess.WHITE:'♙', chess.BLACK:'♟'},
@@ -86,31 +85,15 @@ def sq_col_row(sq, flipped):
     return (7-f, r) if flipped else (f, 7-r)
 
 def px_to_sq(px, py, flipped):
-    x = px - BOARD_OFFSET; y = py - BOARD_OFFSET
+    x = px - BOARD_X; y = py - BOARD_Y
     if not (0 <= x < BOARD_SIZE and 0 <= y < BOARD_SIZE): return None
     c = x // SQUARE_SIZE; r = y // SQUARE_SIZE
     return chess.square(7-c, r) if flipped else chess.square(c, 7-r)
 
 def sq_center(sq, flipped):
     c, r = sq_col_row(sq, flipped)
-    return (BOARD_OFFSET + c*SQUARE_SIZE + SQUARE_SIZE//2,
-            BOARD_OFFSET + r*SQUARE_SIZE + SQUARE_SIZE//2)
-
-
-
-class Btn:
-    def __init__(self, x, y, w, h, lbl, col=None):
-        self.r = pygame.Rect(x, y, w, h)
-        self.lbl = lbl; self.col = col or C_BTN; self.hov = False
-    def update(self, mx, my): self.hov = self.r.collidepoint(mx, my)
-    def hit(self, mx, my): return self.r.collidepoint(mx, my)
-    def draw(self, scr, fnt):
-        pygame.draw.rect(scr, C_BTN_H if self.hov else self.col,
-                         self.r, border_radius=6)
-        pygame.draw.rect(scr, (80,80,80), self.r, 1, border_radius=6)
-        t = fnt.render(self.lbl, True, C_TEXT)
-        scr.blit(t, t.get_rect(center=self.r.center))
-
+    return (BOARD_X + c*SQUARE_SIZE + SQUARE_SIZE//2,
+            BOARD_Y + r*SQUARE_SIZE + SQUARE_SIZE//2)
 
 
 def load_puzzles(csv_path=PUZZLE_CSV, n=200, min_rating=1000, max_rating=1800):
@@ -202,7 +185,7 @@ def load_puzzles(csv_path=PUZZLE_CSV, n=200, min_rating=1000, max_rating=1800):
 
 def fetch_daily_puzzle():
     """
-    Daily Puzzle from Lichess - required internet conenction
+    Daily Puzzle from Lichess — requires an internet connection
     """
     try:
         import urllib.request, json as _json
@@ -218,7 +201,7 @@ def fetch_daily_puzzle():
         if not moves:
             return None
 
-        # FEN + initialPly 
+        # FEN + initialPly
         pgn_moves = game.get('pgn', '').split()
         init_ply  = puzzle.get('initialPly', 0)
         board_tmp = chess.Board()
@@ -234,12 +217,12 @@ def fetch_daily_puzzle():
             'fen':      board_tmp.fen(),
             'solution': moves[0],
             'all_moves': moves,
-            'desc':     'Dnevna puzla',
+            'desc':     'Daily puzzle',
             'rating':   puzzle.get('rating', 0),
             'themes':   ' '.join(puzzle.get('themes', [])),
         }
     except Exception as e:
-        print(f"[PUZZLE] Can't download Daily Lichess Puzzle: {e}")
+        print(f"[PUZZLE] Can't download the daily Lichess puzzle: {e}")
         return None
 
 
@@ -257,62 +240,87 @@ def bot_move(board):
 
 # Drawing
 
-def draw_board(scr, board, fp, fl, sel, last, hov, trail, flipped):
+def draw_piece(scr, fnt, sym, center, is_white):
+    sh = fnt.render(sym, True, (20, 18, 16))
+    scr.blit(sh, sh.get_rect(center=(center[0]+2, center[1]+2)))
+    clr = (250, 250, 250) if is_white else (28, 28, 30)
+    t = fnt.render(sym, True, clr)
+    scr.blit(t, t.get_rect(center=center))
+
+
+def draw_board(scr, board, fp, sel, last, hov, trail, flipped):
+    pygame.draw.rect(scr, ui.BOARD_FRAME,
+                     (BOARD_X-6, BOARD_Y-6, BOARD_SIZE+12, BOARD_SIZE+12),
+                     border_radius=8)
     for sq in chess.SQUARES:
         c, r = sq_col_row(sq, flipped)
-        rect = pygame.Rect(BOARD_OFFSET+c*SQUARE_SIZE,
-                           BOARD_OFFSET+r*SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE)
-        pygame.draw.rect(scr, C_LIGHT if (c+r)%2==0 else C_DARK, rect)
+        rect = pygame.Rect(BOARD_X+c*SQUARE_SIZE,
+                           BOARD_Y+r*SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE)
+        pygame.draw.rect(scr, ui.BOARD_LIGHT if (c+r)%2==0 else ui.BOARD_DARK, rect)
         if last and sq in (last.from_square, last.to_square):
-            s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-            s.fill((205,210,55,110)); scr.blit(s, rect.topleft)
+            ui.alpha_rect(scr, rect, (205, 210, 55, 110))
         if sq == sel:
-            s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-            s.fill((20,200,20,150)); scr.blit(s, rect.topleft)
+            ui.alpha_rect(scr, rect, (20, 200, 20, 110))
         if sq == hov and sq != sel:
-            s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-            s.fill((100,180,255,65)); scr.blit(s, rect.topleft)
+            ui.alpha_rect(scr, rect, (100, 180, 255, 65))
 
     n = len(trail)
     for i, name in enumerate(trail):
         try: tsq = chess.parse_square(name)
         except: continue
         tc, tr2 = sq_col_row(tsq, flipped)
-        s=pygame.Surface((SQUARE_SIZE,SQUARE_SIZE),pygame.SRCALPHA)
-        s.fill((255,70,70, int(30+140*(i/max(n,1)))))
-        scr.blit(s,(BOARD_OFFSET+tc*SQUARE_SIZE, BOARD_OFFSET+tr2*SQUARE_SIZE))
+        ui.alpha_rect(scr, (BOARD_X+tc*SQUARE_SIZE, BOARD_Y+tr2*SQUARE_SIZE,
+                            SQUARE_SIZE, SQUARE_SIZE),
+                      (255, 70, 70, int(30+140*(i/max(n,1)))))
 
     for sq in chess.SQUARES:
         p = board.piece_at(sq)
         if not p: continue
         sym = PIECES[p.piece_type][p.color]
-        cx, cy = sq_center(sq, flipped)
-        sh = fp.render(sym, True, (0,0,0))
-        scr.blit(sh, sh.get_rect(center=(cx+2,cy+2)))
-        scr.blit(fp.render(sym, True,
-            (255,255,255) if p.color==chess.WHITE else (25,25,25)),
-            fp.render(sym,True,(0,0,0)).get_rect(center=(cx,cy)))
+        draw_piece(scr, fp, sym, sq_center(sq, flipped), p.color==chess.WHITE)
 
+    # coordinates inside the edge squares
     for i in range(8):
-        fi = chess.FILE_NAMES[i] if not flipped else chess.FILE_NAMES[7-i]
-        ri = str(8-i) if not flipped else str(i+1)
-        scr.blit(fl.render(fi,True,C_TEXT),(BOARD_OFFSET+i*SQUARE_SIZE+3,
-                                             BOARD_OFFSET+BOARD_SIZE+4))
-        scr.blit(fl.render(ri,True,C_TEXT),(BOARD_OFFSET-18,
-                  BOARD_OFFSET+i*SQUARE_SIZE+SQUARE_SIZE//2-8))
-    pygame.draw.rect(scr,(70,70,70),
-        (BOARD_OFFSET,BOARD_OFFSET,BOARD_SIZE,BOARD_SIZE),2)
+        fn = chess.FILE_NAMES[i] if not flipped else chess.FILE_NAMES[7-i]
+        clr = ui.BOARD_DARK if (i+7) % 2 == 0 else ui.BOARD_LIGHT
+        ui.text(scr, fn, (BOARD_X+i*SQUARE_SIZE+SQUARE_SIZE-4,
+                          BOARD_Y+BOARD_SIZE-2), 11, clr,
+                bold=True, anchor='bottomright')
+        rn = str(8-i) if not flipped else str(i+1)
+        clr = ui.BOARD_DARK if i % 2 == 0 else ui.BOARD_LIGHT
+        ui.text(scr, rn, (BOARD_X+3, BOARD_Y+i*SQUARE_SIZE+1), 11, clr, bold=True)
 
 
-def draw_panel(scr, fnt, btns, lines):
-    pygame.draw.rect(scr, C_PANEL, (PANEL_X-10,0,WINDOW_W-PANEL_X+10,WINDOW_H))
-    for b in btns: b.draw(scr, fnt)
-    y = btns[-1].r.bottom + 20 if btns else BOARD_OFFSET
-    for txt, col in lines:
-        if txt == '---':
-            pygame.draw.line(scr,(70,70,70),(PANEL_X,y+4),(PANEL_X+BUTTON_W+20,y+4))
-            y += 14; continue
-        scr.blit(fnt.render(txt,True,col),(PANEL_X,y)); y += 22
+def draw_panel(scr, btns, title, items):
+    """Side panel: buttons on top, then an info card.
+
+    items: list of ('text', s, color, bold) | ('chips', [names]) |
+           ('sep',) | ('pill', s, bg, fg)
+    """
+    for b in btns:
+        b.draw(scr)
+    top = (btns[-1].rect.bottom + 12) if btns else BOARD_Y
+    rect = ui.card(scr, (PANEL_X, top, PANEL_W, BOARD_Y+BOARD_SIZE-top),
+                   title=title)
+    x = rect.x + 12
+    y = rect.y + 32
+    for it in items:
+        kind = it[0]
+        if kind == 'sep':
+            pygame.draw.line(scr, ui.CARD_BORDER, (x, y+3), (rect.right-12, y+3))
+            y += 12
+        elif kind == 'chips':
+            if it[1]:
+                y = ui.chips(scr, it[1], (x, y), PANEL_W-24) + 6
+            else:
+                ui.text(scr, "—", (x, y), 12, ui.FAINT); y += 20
+        elif kind == 'pill':
+            ui.pill(scr, it[1], (x, y), it[2], it[3])
+            y += 28
+        else:
+            _, s, color, bold = it
+            ui.text(scr, s, (x, y), 12, color, bold=bold)
+            y += 20
 
 
 # Saving
@@ -330,8 +338,7 @@ def save_rec(rec):
 
 # Game mode
 
-def run_game(scr, fonts, pc, total):
-    fp, fl, fu = fonts
+def run_game(scr, fp, pc, total):
     flipped = (pc == chess.BLACK)
     board = chess.Board(); sel=None; last=None; hov=None
     status = f"You are playing {'White' if pc==chess.WHITE else 'Black'}"
@@ -340,9 +347,9 @@ def run_game(scr, fonts, pc, total):
     bt = (board.turn != pc); bra = pygame.time.get_ticks()+BOT_DELAY_MS if bt else 0
 
     bx = PANEL_X
-    b_new  = Btn(bx,60, BUTTON_W,BUTTON_H,'New game',C_ACT)
-    b_undo = Btn(bx,106,BUTTON_W,BUTTON_H,'Undo (Z)')
-    b_menu = Btn(bx,152,BUTTON_W,BUTTON_H,'Menu')
+    b_new  = ui.Button(bx,BOARD_Y,   BUTTON_W,BUTTON_H,'New game',(38,92,56))
+    b_undo = ui.Button(bx,BOARD_Y+48,BUTTON_W,BUTTON_H,'Undo (Z)')
+    b_menu = ui.Button(bx,BOARD_Y+96,BUTTON_W,BUTTON_H,'Menu')
     btns = [b_new, b_undo, b_menu]
     clock = pygame.time.Clock()
 
@@ -410,7 +417,7 @@ def run_game(scr, fonts, pc, total):
                              'fen':fen0,'target_square':chess.square_name(sq),
                              'mode':'game'}
                         save_rec(rec); new+=1; total+=1
-                        status=f'{san}  |  Ukupno: {total}'
+                        status=f'{san}  |  Total: {total}'
                         if board.is_game_over():
                             status=f'End: {board.result()} — new game?'
                         else:
@@ -418,26 +425,29 @@ def run_game(scr, fonts, pc, total):
                     else:
                         p=board.piece_at(sq)
                         sel=sq if (p and p.color==pc) else None
-                        if not sel: status='Ilegal move.'
+                        if not sel: status='Illegal move.'
 
-        scr.fill(C_BG)
-        draw_board(scr,board,fp,fl,sel,last,hov,gaze,flipped)
+        scr.fill(ui.BG)
+        ui.header(scr,WINDOW_W,"Chess Gaze Collector","You vs Bot",
+                  right_pill=("GAME MODE",ui.BLUE_DARK,(180,205,255)))
+        draw_board(scr,board,fp,sel,last,hov,gaze,flipped)
         cl='White' if board.turn==chess.WHITE else 'Black'
         ag='YOU' if board.turn==pc else 'BOT'
-        info=[(f'Mode: You vs BOT',C_DIM),(f'You: {"White" if pc==chess.WHITE else "Black"}  |  F=flip',C_TEXT),
-              ('---',C_TEXT),(f'To move: {cl} ({ag})',C_YELLOW),
-              ('---',C_TEXT),('Gaze (mouse):',C_DIM),
-              (' → '.join(list(gaze)[-6:]) or '—', C_RED),
-              ('---',C_TEXT),('N=new  Z=undo  M=menu',C_DIM),
-              ('F=flip  ESC=menu',C_DIM),
-              ('---',C_TEXT),(status,C_GREEN)]
-        draw_panel(scr,fu,btns,info)
+        items=[('text',f'You play {"White" if pc==chess.WHITE else "Black"}',ui.TEXT,True),
+               ('text',f'To move: {cl} ({ag})',ui.AMBER,False),
+               ('sep',),
+               ('text','GAZE (MOUSE)',ui.FAINT,True),
+               ('chips',list(gaze)[-6:]),
+               ('sep',),
+               ('text',status,ui.GREEN,False)]
+        draw_panel(scr,btns,"Game",items)
+        ui.hints(scr,(BOARD_X,BOARD_Y+BOARD_SIZE+16),
+                 [("N","new"),("Z","undo"),("F","flip"),("ESC","menu")])
         pygame.display.flip(); clock.tick(60)
 
 # Puzzle mode
 
-def run_puzzle(scr, fonts, total):
-    fp, fl, fu = fonts
+def run_puzzle(scr, fp, total):
     idx = 0; new = 0
 
     def load(i):
@@ -447,13 +457,13 @@ def run_puzzle(scr, fonts, total):
 
     board, flipped, puz = load(idx)
     pc=board.turn; sel=None; last=None; hov=None
-    status=f'Puzla {idx+1}: {puz["desc"]}'
+    status=f'Puzzle {idx+1}: {puz["desc"]}'
     gaze=deque(maxlen=GAZE_WINDOW*3); logged=None
 
     bx=PANEL_X
-    b_next=Btn(bx,60, BUTTON_W,BUTTON_H,'Next puzzle',C_ACT)
-    b_hint=Btn(bx,106,BUTTON_W,BUTTON_H,'Hint')
-    b_menu=Btn(bx,152,BUTTON_W,BUTTON_H,'Menu')
+    b_next=ui.Button(bx,BOARD_Y,   BUTTON_W,BUTTON_H,'Next puzzle',(38,92,56))
+    b_hint=ui.Button(bx,BOARD_Y+48,BUTTON_W,BUTTON_H,'Hint')
+    b_menu=ui.Button(bx,BOARD_Y+96,BUTTON_W,BUTTON_H,'Menu')
     btns=[b_next,b_hint,b_menu]
     clock=pygame.time.Clock()
 
@@ -512,32 +522,33 @@ def run_puzzle(scr, fonts, total):
                         p=board.piece_at(sq)
                         sel=sq if (p and p.color==pc) else None
 
-        scr.fill(C_BG)
-        draw_board(scr,board,fp,fl,sel,last,hov,gaze,flipped)
+        scr.fill(ui.BG)
+        ui.header(scr,WINDOW_W,"Chess Gaze Collector","Lichess puzzles",
+                  right_pill=("PUZZLE MODE",ui.GREEN_DARK,(190,255,205)))
+        draw_board(scr,board,fp,sel,last,hov,gaze,flipped)
         cl='White' if board.turn==chess.WHITE else 'Black'
-        info=[(f'Mode: Puzzle  {idx+1}/{len(PUZZLES)}',C_DIM),
-              (f'{puz["desc"]}',C_TEXT),('---',C_TEXT),
-              (f'To move: {cl}',C_YELLOW),('(board flipped)',C_DIM),
-              ('---',C_TEXT),('Gaze (mouse):',C_DIM),
-              (' → '.join(list(gaze)[-6:]) or '—', C_RED),
-              ('---',C_TEXT),('ENTER/N=next  H=hint',C_DIM),
-              ('M=menu  ESC=menu',C_DIM),
-              ('---',C_TEXT),(status,C_GREEN)]
-        draw_panel(scr,fu,btns,info)
+        items=[('text',f'Puzzle {idx+1}/{len(PUZZLES)}',ui.TEXT,True),
+               ('text',puz["desc"][:26],ui.DIM,False),
+               ('text',f'To move: {cl}',ui.AMBER,False),
+               ('sep',),
+               ('text','GAZE (MOUSE)',ui.FAINT,True),
+               ('chips',list(gaze)[-6:]),
+               ('sep',),
+               ('text',status,ui.GREEN,False)]
+        draw_panel(scr,btns,"Puzzle",items)
+        ui.hints(scr,(BOARD_X,BOARD_Y+BOARD_SIZE+16),
+                 [("N","next"),("H","hint"),("ESC","menu")])
         pygame.display.flip(); clock.tick(60)
 
 # Menu
 
-def run_menu(scr, fonts, total):
-    _,_,fu=fonts
-    ft=pygame.font.SysFont('arial',28,bold=True)
-    fs=pygame.font.SysFont('arial',15)
+def run_menu(scr, total):
     cx=WINDOW_W//2
 
-    b_w=Btn(cx-90,210,180,44,'Play White',C_ACT)
-    b_b=Btn(cx-90,266,180,44,'Play Black',C_ACT)
-    b_p=Btn(cx-90,350,180,44,'Solve puzzles',C_BLUE)
-    b_q=Btn(cx-90,430,180,44,'EXIT',       (130,50,50))
+    b_w=ui.Button(cx-110,290,220,44,'Play White',(38,92,56))
+    b_b=ui.Button(cx-110,342,220,44,'Play Black',(38,92,56))
+    b_p=ui.Button(cx-110,428,220,44,'Solve puzzles',(35,55,105))
+    b_q=ui.Button(cx-110,510,220,44,'Quit',(105,44,44))
     btns=[b_w,b_b,b_p,b_q]
     clock=pygame.time.Clock()
 
@@ -557,21 +568,20 @@ def run_menu(scr, fonts, total):
                 if b_p.hit(mx,my): return 'puzzle',None
                 if b_q.hit(mx,my): return None,None
 
-        scr.fill(C_BG)
-        scr.blit(ft.render('Chess Gaze Collector',True,C_TEXT),
-                 ft.render('Chess Gaze Collector',True,C_TEXT).get_rect(center=(cx,100)))
-        scr.blit(fs.render('Mouse = gaze proxy',True,C_DIM),
-                 fs.render('Mouse - gaze proxy',True,C_DIM).get_rect(center=(cx,140)))
-        scr.blit(fs.render(f'Total moves: {total}',True,C_GREEN),
-                 fs.render(f'Total moves: {total}',True,C_GREEN).get_rect(center=(cx,168)))
-        scr.blit(fu.render('YOU vs BOT─',True,C_DIM),
-                 fu.render('YOU vs BOT',True,C_DIM).get_rect(center=(cx,192)))
-        scr.blit(fu.render('Puzzles',True,C_DIM),
-                 fu.render('Puzzles',True,C_DIM).get_rect(center=(cx,330)))
-        for b in btns: b.draw(scr,fu)
-        scr.blit(fs.render('1/W=White  2/B=Black  3/P=Puzzles  Q/ESC=EXIT',True,C_DIM),(20,WINDOW_H-24))
+        scr.fill(ui.BG)
+        ui.text(scr,'Chess Gaze Collector',(cx,150),30,ui.TEXT,bold=True,
+                anchor='center')
+        ui.text(scr,'Collect gaze-sequence training data — mouse acts as gaze proxy',
+                (cx,192),13,ui.DIM,anchor='center')
+        ui.pill(scr,f'TOTAL MOVES COLLECTED: {total}',(cx,228),
+                ui.GREEN_DARK,(190,255,205),anchor='center')
+        ui.text(scr,'YOU vs BOT',(cx,272),11,ui.FAINT,bold=True,anchor='center')
+        ui.text(scr,'PUZZLES',(cx,412),11,ui.FAINT,bold=True,anchor='center')
+        for b in btns: b.draw(scr)
+        ui.hints(scr,(MARGIN,WINDOW_H-32),
+                 [("1/W","white"),("2/B","black"),("3/P","puzzles"),
+                  ("Q/ESC","quit")])
         pygame.display.flip(); clock.tick(60)
-
 
 
 def count_saved():
@@ -583,9 +593,7 @@ if __name__ == '__main__':
     pygame.init()
     scr = pygame.display.set_mode((WINDOW_W, WINDOW_H))
     pygame.display.set_caption('Chess Gaze Collector')
-    fonts = (pygame.font.SysFont('segoeuisymbol', SQUARE_SIZE-10),
-             pygame.font.SysFont('arial',13),
-             pygame.font.SysFont('arial',14))
+    fp = ui.piece_font(SQUARE_SIZE-10)
     os.makedirs('data', exist_ok=True)
     total = count_saved()
 
@@ -603,10 +611,10 @@ if __name__ == '__main__':
             print("[PUZZLE] Using fallback puzzles.")
 
     while True:
-        mod, pc = run_menu(scr, fonts, total)
+        mod, pc = run_menu(scr, total)
         if mod is None: break
-        if mod == 'game':   new, sig = run_game(scr, fonts, pc, total)
-        elif mod == 'puzzle': new, sig = run_puzzle(scr, fonts, total)
+        if mod == 'game':   new, sig = run_game(scr, fp, pc, total)
+        elif mod == 'puzzle': new, sig = run_puzzle(scr, fp, total)
         total += new
         if sig == 'quit': break
 
